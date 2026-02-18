@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Deploy flows with GitHub pull_steps"""
+"""Deploy flows with GitHub pull_steps - Updated for Prefect 3.x"""
 
 import subprocess
 import sys
@@ -19,17 +19,17 @@ for flow_path, flow_name, deployment_name in flows:
     print(f"\n📦 Deploying: {deployment_name}")
     print(f"   Flow: {flow_name}")
     print(f"   File: {flow_path}")
-    
+
+    # Simplified command for Prefect 3.x
     cmd = [
         sys.executable,
         "-m", "prefect",
         "deploy",
         f"{flow_path}:{flow_name}",
         "-n", deployment_name,
-        "--work-pool", "Yichen_Test",
-        "-q"  # Quiet mode
+        "--pool", "Yichen_Test"
     ]
-    
+
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         print(f"   ✅ Success!")
@@ -37,24 +37,20 @@ for flow_path, flow_name, deployment_name in flows:
             print(f"   Output: {result.stdout.strip()}")
     except subprocess.CalledProcessError as e:
         print(f"   ❌ Error: {e.stderr}")
-        sys.exit(1)
+        # Don't exit immediately, try the next flow
+        continue
 
 print("\n" + "=" * 80)
 print("✅ ALL DEPLOYMENTS COMPLETE")
 print("=" * 80)
 print("\n🔗 GitHub Configuration:")
-print("   Repository: https://github.com/forg1ve1125/Prefect_Project")
+print("   Repository: https://github.com/Jessy-Steve251/Prefect-IMF-Project.git")
 print("   Branch: main")
-print("\n📋 Schedules:")
+print("\n📋 Schedules (from prefect.yaml):")
 print("   currency-acquisition: 12:10 on 17th of each month")
 print("   prepare-batch: 12:30 on 17th of each month")
 print("   process-batch: 13:00 on 17th of each month")
-print("\n⚠️  NEXT STEPS:")
-print("   1. Create GitHub repository: https://github.com/new")
-print("   2. Push code to GitHub:")
-print("      git init")
-print("      git add .")
-print("      git commit -m 'Initial Prefect deployment'")
-print('      git branch -M main')
-print("      git remote add origin https://github.com/forg1ve1125/Prefect_Project.git")
-print("      git push -u origin main")
+print("\n⚙️  Work Pool: Yichen_Test")
+print("\n🚀 NEXT STEPS:")
+print("   1. Start a worker: prefect worker start --pool Yichen_Test")
+print("   2. Run a deployment: prefect deployment run 'currency-acquisition/currency-acquisition'")

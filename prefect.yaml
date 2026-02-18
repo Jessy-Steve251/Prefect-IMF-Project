@@ -9,7 +9,7 @@ deployments:
       - type: set_working_directory
         directory: "."
       - type: git_clone
-        repository: "https://github.com/forg1ve1125/Prefect_Project.git"
+        repository: "https://github.com/Jessy-Steve251/Prefect-IMF-Project.git"
         branch: "main"
       - type: pip_install_requirements
         directory: "."
@@ -27,7 +27,7 @@ deployments:
       name: Yichen_Test
     pull_steps:
       - type: git_clone
-        repository: "https://github.com/forg1ve1125/Prefect_Project.git"
+        repository: "https://github.com/Jessy-Steve251/Prefect-IMF-Project.git"
         branch: "main"
       - type: pip_install_requirements
         directory: "{{ pull_steps[0].directory }}"
@@ -45,7 +45,7 @@ deployments:
       name: Yichen_Test
     pull_steps:
       - type: git_clone
-        repository: "https://github.com/forg1ve1125/Prefect_Project.git"
+        repository: "https://github.com/Jessy-Steve251/Prefect-IMF-Project.git"
         branch: "main"
       - type: pip_install_requirements
         directory: "{{ pull_steps[0].directory }}"
