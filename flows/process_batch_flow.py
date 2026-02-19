@@ -18,7 +18,7 @@ def process_batch_flow(manifest_file: str = ""):
     
     # If no manifest file provided, find the latest one
     if not manifest_file:
-        hotfolder = r"C:\DATA_PIPELINE\3_processing_hotfolder"
+        hotfolder = os.path.join(os.getcwd(), "data_pipeline", "3_processing_hotfolder")
         os.makedirs(hotfolder, exist_ok=True)
         
         # Find all manifest files
