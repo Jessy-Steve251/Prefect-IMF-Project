@@ -3,11 +3,11 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-BASE_DIR = r"C:\DATA_PIPELINE"
+# Use a relative path that works in any environment
+BASE_DIR = os.path.join(os.getcwd(), "data_pipeline")
 INPUT_DIR = os.path.join(BASE_DIR, "1_input")
 PRE_DIR = os.path.join(BASE_DIR, "2_preprocessing")
 HOT_DIR = os.path.join(BASE_DIR, "3_processing_hotfolder")
-
 
 def create_batch_manifest():
     """
