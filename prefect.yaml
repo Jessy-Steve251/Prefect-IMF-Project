@@ -1,19 +1,18 @@
 deployments:
   - name: currency-acquisition
     description: Acquire currency exchange rate data
-    flow: currency_acquisition_flow
     entrypoint: flows/currency_acquisition_flow.py:currency_acquisition_flow
     work_pool:
       name: Yichen_Test
-    pull_steps:
-      - type: set_working_directory
-        directory: "."
-      - type: git_clone
-        repository: "https://github.com/Jessy-Steve251/Prefect-IMF-Project.git"
-        branch: "main"
-      - type: pip_install_requirements
-        directory: "."
-        requirements_file: "requirements.txt"
+    pull:
+      - prefect.deployments.steps.git_clone:
+          id: clone-step
+          repository: "{{ prefect.blocks.github-repository.imf-github-repo.repository_url }}"
+          branch: "{{ prefect.blocks.github-repository.imf-github-repo.reference }}"
+          credentials: "{{ prefect.blocks.secret.github-token }}"
+      - prefect.deployments.steps.pip_install_requirements:
+          directory: "{{ clone-step.directory }}"
+          requirements_file: requirements.txt
     schedules:
       - cron: "10 17 17 * *"
         timezone: Europe/Zurich
@@ -21,17 +20,18 @@ deployments:
 
   - name: prepare-batch
     description: Prepare batch data
-    flow: prepare_batch_flow
     entrypoint: flows/prepare_batch_flow.py:prepare_batch_flow
     work_pool:
       name: Yichen_Test
-    pull_steps:
-      - type: git_clone
-        repository: "https://github.com/Jessy-Steve251/Prefect-IMF-Project.git"
-        branch: "main"
-      - type: pip_install_requirements
-        directory: "{{ pull_steps[0].directory }}"
-        requirements_file: "requirements.txt"
+    pull:
+      - prefect.deployments.steps.git_clone:
+          id: clone-step
+          repository: "{{ prefect.blocks.github-repository.imf-github-repo.repository_url }}"
+          branch: "{{ prefect.blocks.github-repository.imf-github-repo.reference }}"
+          credentials: "{{ prefect.blocks.secret.github-token }}"
+      - prefect.deployments.steps.pip_install_requirements:
+          directory: "{{ clone-step.directory }}"
+          requirements_file: requirements.txt
     schedules:
       - cron: "30 17 17 * *"
         timezone: Europe/Zurich
@@ -39,17 +39,18 @@ deployments:
 
   - name: process-batch
     description: Process batch data
-    flow: process_batch_flow
     entrypoint: flows/process_batch_flow.py:process_batch_flow
     work_pool:
       name: Yichen_Test
-    pull_steps:
-      - type: git_clone
-        repository: "https://github.com/Jessy-Steve251/Prefect-IMF-Project.git"
-        branch: "main"
-      - type: pip_install_requirements
-        directory: "{{ pull_steps[0].directory }}"
-        requirements_file: "requirements.txt"
+    pull:
+      - prefect.deployments.steps.git_clone:
+          id: clone-step
+          repository: "{{ prefect.blocks.github-repository.imf-github-repo.repository_url }}"
+          branch: "{{ prefect.blocks.github-repository.imf-github-repo.reference }}"
+          credentials: "{{ prefect.blocks.secret.github-token }}"
+      - prefect.deployments.steps.pip_install_requirements:
+          directory: "{{ clone-step.directory }}"
+          requirements_file: requirements.txt
     schedules:
       - cron: "30 17 17 * *"
         timezone: Europe/Zurich
