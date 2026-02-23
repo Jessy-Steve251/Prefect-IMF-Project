@@ -9,7 +9,8 @@ deployments:
           id: clone-step
           repository: "{{ prefect.blocks.github-repository.imf-github-repo.repository_url }}"
           branch: "{{ prefect.blocks.github-repository.imf-github-repo.reference }}"
-          credentials: "{{ prefect.blocks.secret.github-token }}"
+          credentials:
+            access_token: "{{ prefect.blocks.secret.github-token }}"
       - prefect.deployments.steps.pip_install_requirements:
           directory: "{{ clone-step.directory }}"
           requirements_file: requirements.txt
@@ -28,7 +29,8 @@ deployments:
           id: clone-step
           repository: "{{ prefect.blocks.github-repository.imf-github-repo.repository_url }}"
           branch: "{{ prefect.blocks.github-repository.imf-github-repo.reference }}"
-          credentials: "{{ prefect.blocks.secret.github-token }}"
+          credentials:
+            access_token: "{{ prefect.blocks.secret.github-token }}"
       - prefect.deployments.steps.pip_install_requirements:
           directory: "{{ clone-step.directory }}"
           requirements_file: requirements.txt
@@ -47,7 +49,28 @@ deployments:
           id: clone-step
           repository: "{{ prefect.blocks.github-repository.imf-github-repo.repository_url }}"
           branch: "{{ prefect.blocks.github-repository.imf-github-repo.reference }}"
-          credentials: "{{ prefect.blocks.secret.github-token }}"
+          credentials:
+            access_token: "{{ prefect.blocks.secret.github-token }}"
+      - prefect.deployments.steps.pip_install_requirements:
+          directory: "{{ clone-step.directory }}"
+          requirements_file: requirements.txt
+    schedules:
+      - cron: "30 17 17 * *"
+        timezone: Europe/Zurich
+        active: true
+
+  - name: complete-batch-pipeline
+    description: Run complete batch pipeline
+    entrypoint: flows/complete_batch_pipeline.py:complete_batch_pipeline
+    work_pool:
+      name: Yichen_Test
+    pull:
+      - prefect.deployments.steps.git_clone:
+          id: clone-step
+          repository: "{{ prefect.blocks.github-repository.imf-github-repo.repository_url }}"
+          branch: "{{ prefect.blocks.github-repository.imf-github-repo.reference }}"
+          credentials:
+            access_token: "{{ prefect.blocks.secret.github-token }}"
       - prefect.deployments.steps.pip_install_requirements:
           directory: "{{ clone-step.directory }}"
           requirements_file: requirements.txt

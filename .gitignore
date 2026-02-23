@@ -18,3 +18,23 @@ prefect.db
 Thumbs.db 
 *.log 
 logs/ 
+
+# Data files
+*.csv
+*.parquet
+*.xlsx
+data/
+currency_data_*/
+complete_dataset_*.csv
+
+# Backups
+*_original.bat
+*_original.ps1
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+Running
+temp_*.py

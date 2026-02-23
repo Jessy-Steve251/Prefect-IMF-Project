@@ -2,6 +2,7 @@
 from prefect import flow, task
 from prefect.artifacts import create_table_artifact, create_markdown_artifact
 import pandas as pd
+import argparse
 from pathlib import Path
 
 @task
@@ -78,4 +79,9 @@ def show_historical_flow():
     print("   Then go to the 'Artifacts' tab")
 
 if __name__ == "__main__":
-    show_historical_flow()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--2000":
+        print("📊 Showing 2000-present data...")
+        show_historical_flow("exchange_rates_2000_to_present.csv")
+    else:
+        show_historical_flow()

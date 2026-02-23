@@ -1,63 +1,72 @@
-# 使用 schtasks.exe (Windows 内置工具) 创建任务
-# 这不需要管理员权限的 PowerShell 对象
+# Using schtasks.exe (built-in Windows tool)
+# Updated for Admin's system
 
-$ProjectPath = "C:\Users\yli\Desktop\Prefect_Project"
-$ScriptPath = "$ProjectPath\run_flows_locally.py"
+$ProjectPath = "C:\Users\Admin\Projects\Prefect_Project-main"
+$PythonPath = "C:\Users\Admin\Projects\Prefect_Project-main\venv\Scripts\python.exe"
 
 Write-Host "=================================================="
 Write-Host "Setting up Task Scheduler using schtasks.exe"
 Write-Host "=================================================="
 Write-Host ""
 
-# 定义任务
+# Define tasks
 $Tasks = @(
     @{
         Name = "Prefect-CurrencyAcquisition"
         Time = "09:00"
+        Module = "currency_acquisition_flow"
         Description = "Acquire currency exchange rates"
     },
     @{
         Name = "Prefect-PrepareBatch"
         Time = "09:30"
+        Module = "prepare_batch_flow"
         Description = "Prepare batch data"
     },
     @{
         Name = "Prefect-ProcessBatch"
         Time = "10:00"
+        Module = "process_batch_flow"
         Description = "Process batch data"
     }
 )
 
 foreach ($Task in $Tasks) {
     Write-Host "Creating task: $($Task.Name)"
-    Write-Host "  Time: $($Task.Time)"
+    Write-Host "  Time: $($Task.Time) on day 17"
     Write-Host "  Description: $($Task.Description)"
     Write-Host ""
-    
-    # 使用 schtasks.exe 创建任务
-    # 格式: schtasks /create /tn "任务名" /tr "命令" /sc daily /st HH:MM
-    
-    $Command = "python `"$ScriptPath`""
+
+    # Create batch file
     $BatchFile = "$ProjectPath\run_$($Task.Name).bat"
     
-    # 创建 .bat 文件作为中间层
+    # Create batch content with venv activation
     $BatchContent = @"
 @echo off
 cd /d "$ProjectPath"
-python "$ScriptPath"
+call venv\Scripts\activate
+python -m flows.$($Task.Module)
+if %ERRORLEVEL% EQU 0 (
+    echo %date% %time% - $($Task.Name) SUCCESS >> "$ProjectPath\logs\task_scheduler.log"
+) else (
+    echo %date% %time% - $($Task.Name) FAILED >> "$ProjectPath\logs\task_scheduler.log"
+)
 "@
-    
+
     Set-Content -Path $BatchFile -Value $BatchContent
     Write-Host "  Created batch file: $BatchFile"
-    
-    # 使用 schtasks.exe 创建任务
+
+    # Delete existing task if it exists
+    & schtasks /delete /tn $Task.Name /f 2>$null
+
+    # Create new task using schtasks.exe (monthly on day 17)
     try {
-        & schtasks /create /tn $Task.Name /tr "`"$BatchFile`"" /sc daily /st $Task.Time /f
-        Write-Host "  OK Task created successfully"
+        & schtasks /create /tn $Task.Name /tr "`"$BatchFile`"" /sc monthly /d 17 /st $Task.Time /f
+        Write-Host "  ✅ Task created successfully"
         Write-Host ""
     }
     catch {
-        Write-Host "  ERROR: $_"
+        Write-Host "  ❌ ERROR: $_"
         Write-Host ""
     }
 }
