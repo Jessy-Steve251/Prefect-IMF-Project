@@ -6,6 +6,16 @@ Scheduler with Prefect Cloud for monitoring.
 
 ---
 
+## What's New (v2)
+
+- **Chunked historical backfill**: Fetches data in yearly API calls instead of 300+ individual monthly calls (2000-present in ~25 API calls)
+- **Cross-validation**: Compare stored CSVs against live IMF API values to detect rate mismatches, missing countries, and stale data
+- **Rate accuracy checks**: Single-month validation now includes actual rate comparison against IMF
+- **Force-refetch**: Overwrite existing data when needed
+- **Date-range fetching**: Single API call returns multiple months of data
+
+---
+
 ## Architecture
 
 | Layer | Component | Role |
@@ -24,23 +34,32 @@ success — no time gaps, no race conditions, no cloud scheduling involved.
 
 ```
 Windows Task Scheduler
-  └── 17th of month, 17:10
-        └── run_CurrencyAcquisition.bat
-              └── [Flow 1] currency_acquisition_flow
-                    │  fetch IMF rates → validate → create Cloud artifacts
-                    │  SUCCESS ──────────────────────────────────────────┐
-                    │  FAIL → stops here, logs to Cloud + local log      │
-                    ▼                                                     │
-              [Flow 2] prepare_batch_flow  ◄────────────────────────────┘
-                    │  scan 1_input → merge files → write MANIFEST.json
-                    │  SUCCESS ──────────────────────────────────────────┐
-                    │  FAIL → stops here                                 │
-                    ▼                                                     │
-              [Flow 3] process_batch_flow  ◄────────────────────────────┘
-                    │  load MANIFEST → transform → archive to 4_archive/
-                    └── done
+  +-- 17th of month, 17:10
+        +-- run_CurrencyAcquisition.bat
+              +-- [Flow 1] currency_acquisition_flow
+                    |  fetch IMF rates -> validate (incl. rate accuracy) -> artifacts
+                    |  SUCCESS ---+
+                    |  FAIL -> stops here
+                    v             |
+              [Flow 2] prepare_batch_flow  <---+
+                    |  scan 1_input -> merge files -> write MANIFEST.json
+                    |  SUCCESS ---+
+                    |  FAIL -> stops here
+                    v             |
+              [Flow 3] process_batch_flow  <---+
+                    |  load MANIFEST -> transform -> archive to 4_archive/
+                    +-- done
+```
 
-All 3 flow runs visible in Prefect Cloud UI with full logs and status.
+### Historical Backfill (separate flow)
+
+```
+run_backfill.bat
+  +-- historical_backfill_flow
+        |  Chunked fetch: 2000-01 -> present (yearly API calls)
+        |  Build combined exchange_rates_ALL.csv
+        |  Optional: cross-validate against live IMF data
+        +-- done
 ```
 
 ---
@@ -48,43 +67,35 @@ All 3 flow runs visible in Prefect Cloud UI with full logs and status.
 ## Repository Structure
 
 ```
-├── flows/
-│   ├── currency_acquisition_flow.py   Flow 1: fetch + validate + chain
-│   ├── prepare_batch_flow.py          Flow 2: prep files + manifest + chain
-│   ├── process_batch_flow.py          Flow 3: transform + archive
-│   └── historical_backfill_flow.py    One-shot backfill (2000 → present)
-│
-├── utils/
-│   ├── config.py                      All paths and constants
-│   ├── exchange_rate_fetcher.py       IMF API + REST Countries (parallel, cached)
-│   ├── batch_prepare.py               Preprocessing + manifest creation
-│   ├── core_processor.py              Core transformation + archiving
-│   └── imf_data_validator.py          Data completeness validator
-│
-├── watcher/
-│   └── local_file_event_watcher.py    Optional hotfolder event emitter
-│
-├── scripts/
-│   ├── setup_new_machine.bat          First-time setup (run once)
-│   ├── setup_task_scheduler.ps1       Register Windows Scheduled Tasks (run once, as Admin)
-│   ├── start_worker.bat               Start Prefect worker (kept open / auto-started)
-│   ├── run_CurrencyAcquisition.bat    Pipeline entry point (Task Scheduler target)
-│   ├── run_PrepareBatch.bat           Manual re-run: Flow 2 only
-│   ├── run_ProcessBatch.bat           Manual re-run: Flow 3 only
-│   ├── run_pipeline_manual.bat        Manual full pipeline run (same as Task Scheduler)
-│   └── run_backfill.bat               Trigger historical backfill
-│
-├── data/                              Exchange rate CSVs (git-ignored)
-├── data_pipeline/                     Pipeline stage folders (git-ignored)
-│   ├── 1_input/                       Drop partner/unit CSVs here
-│   ├── 2_preprocessing/
-│   ├── 3_processing_hotfolder/
-│   ├── 4_archive/
-│   ├── 5_error/
-│   └── 6_logs/
-├── logs/                              Task Scheduler local log (git-ignored)
-├── prefect.yaml
-└── requirements.txt
++-- flows/
+|   +-- currency_acquisition_flow.py   Flow 1: fetch + validate + chain
+|   +-- prepare_batch_flow.py          Flow 2: prep files + manifest + chain
+|   +-- process_batch_flow.py          Flow 3: transform + archive
+|   +-- historical_backfill_flow.py    Backfill (2000->present) + cross-validation
+|
++-- utils/
+|   +-- config.py                      All paths and constants
+|   +-- exchange_rate_fetcher.py       IMF API (single, range, chunked) + REST Countries
+|   +-- batch_prepare.py               Preprocessing + manifest creation
+|   +-- core_processor.py              Core transformation + archiving
+|   +-- imf_data_validator.py          Validation + cross-validation against IMF
+|
++-- watcher/
+|   +-- local_file_event_watcher.py    Optional hotfolder event emitter
+|
++-- scripts/
+|   +-- setup_new_machine.bat          First-time setup (run once)
+|   +-- setup_task_scheduler.ps1       Register Windows Scheduled Tasks
+|   +-- start_worker.bat               Start Prefect worker
+|   +-- run_CurrencyAcquisition.bat    Pipeline entry point
+|   +-- run_PrepareBatch.bat           Manual re-run: Flow 2 only
+|   +-- run_ProcessBatch.bat           Manual re-run: Flow 3 only
+|   +-- run_pipeline_manual.bat        Manual full pipeline run
+|   +-- run_backfill.bat               Historical backfill (2000->present)
+|   +-- run_cross_validate.bat         Cross-validate stored data vs IMF
+|
++-- data/                              Exchange rate CSVs (git-ignored)
++-- data_pipeline/                     Pipeline stage folders (git-ignored)
 ```
 
 ---
@@ -98,55 +109,99 @@ cd Prefect-IMF-Project
 scripts\setup_new_machine.bat
 ```
 
-This will:
-- Create the Python virtual environment
-- Install all dependencies
-- Log you in to Prefect Cloud
-- Save your GitHub token as a Prefect secret block
-- Deploy all flows to Prefect Cloud
-
 ### Step 2 — Register Windows Scheduled Tasks
-Right-click `scripts\setup_task_scheduler.ps1` → **Run with PowerShell** (as Administrator).
+Right-click `scripts\setup_task_scheduler.ps1` -> **Run with PowerShell** (as Administrator).
 
-This registers two tasks:
-- `Prefect-IMF-Worker` — starts the Prefect worker on boot + daily restart at 08:00
-- `Prefect-IMF-Pipeline` — triggers Flow 1 on the 17th at 17:10
-
-### Step 3 — Start the worker now (without rebooting)
+### Step 3 — Start the worker
 ```
 scripts\start_worker.bat
 ```
-Keep this window open. The Task Scheduler will manage it automatically after a reboot.
 
 ### Step 4 — Run historical backfill (first time only)
 ```
 scripts\run_backfill.bat
 ```
+This fetches 2000-present in ~25 yearly API calls (takes a few minutes).
+
+### Step 5 — (Optional) Cross-validate the data
+```
+scripts\run_cross_validate.bat --sample 24
+```
+Validates 24 random months against live IMF values.
 
 ---
 
 ## Monthly Operation
 
-The pipeline runs automatically. Nothing needs to be done manually each month.
+The pipeline runs automatically on the 17th at 17:10.
 
-On the 17th at 17:10:
-1. Task Scheduler fires `run_CurrencyAcquisition.bat`
-2. Flow 1 fetches IMF data and validates it
-3. Flow 2 prepares the batch artefacts
-4. Flow 3 processes and archives the results
-
-Monitor results at [app.prefect.cloud](https://app.prefect.cloud).
+Monitor at [app.prefect.cloud](https://app.prefect.cloud).
 
 ---
 
-## Manual Re-runs
+## Manual Operations
 
-| Scenario | Script to run |
+| Scenario | Command |
 |---|---|
-| Re-run the full pipeline | `scripts\run_pipeline_manual.bat` |
-| Flow 1 succeeded, re-run from Flow 2 | `scripts\run_PrepareBatch.bat` |
-| Flow 2 succeeded, re-run from Flow 3 | `scripts\run_ProcessBatch.bat` |
-| Backfill missing historical data | `scripts\run_backfill.bat` |
+| Re-run full pipeline | `scripts\run_pipeline_manual.bat` |
+| Flow 2+ only | `scripts\run_PrepareBatch.bat` |
+| Flow 3 only | `scripts\run_ProcessBatch.bat` |
+| Backfill 2000->present | `scripts\run_backfill.bat` |
+| Force re-fetch all history | `scripts\run_backfill.bat --force` |
+| Backfill + validate all | `scripts\run_backfill.bat --validate-all` |
+| Backfill from 2020 only | `scripts\run_backfill.bat --start-year 2020` |
+| Cross-validate all months | `scripts\run_cross_validate.bat` |
+| Cross-validate 24 random months | `scripts\run_cross_validate.bat --sample 24` |
+| Cross-validate specific range | `scripts\run_cross_validate.bat --start 2020-01 --end 2024-12` |
+| Validate single CSV | `python utils\imf_data_validator.py --csv data\exchange_rates_2025_01.csv` |
+| Validate CSV + rate check | Same as above (rate check is now on by default) |
+| Validate CSV without rate check | `python utils\imf_data_validator.py --csv data\exchange_rates_2025_01.csv --no-rate-check` |
+
+---
+
+## How Fetching Works
+
+### Monthly fetch (Flow 1)
+Single API call for one month -> saves `exchange_rates_YYYY_MM.csv`
+
+### Historical backfill (chunked)
+Instead of 300+ individual API calls:
+```
+Chunk 1:  2000-01 -> 2000-12  (1 API call, 12 months of data)
+Chunk 2:  2001-01 -> 2001-12  (1 API call)
+...
+Chunk 25: 2024-01 -> 2024-12  (1 API call)
+Chunk 26: 2025-01 -> 2025-12  (1 API call, partial year)
+```
+Each chunk's response is split into individual monthly CSVs.
+
+### Cross-validation
+For each month being validated:
+1. Load stored CSV from `data/`
+2. Fetch fresh rates from IMF API
+3. Compare every country's rate (tolerance: 0.1%)
+4. Flag mismatches
+
+---
+
+## Validation Checks
+
+### Single-month validation (runs automatically in Flow 1)
+| Check | Action |
+|---|---|
+| Country coverage | Compares CSV countries vs IMF API |
+| Null currency codes | Flags unresolved currencies |
+| Duplicate records | Same Country+Date appearing twice |
+| Rate anomalies | Zero, negative, implausibly large/small |
+| Date correctness | Rows stamped with wrong month |
+| Month-on-month | Rates that moved >30% (warning only) |
+| **Rate accuracy** | **Compares values against live IMF data** |
+
+### Cross-validation (run on demand)
+Compares stored historical CSVs against fresh IMF API pulls to detect:
+- Rate drift (values changed since original fetch)
+- Missing countries (IMF added data retroactively)
+- Stale data (your CSV has old values)
 
 ---
 
@@ -154,39 +209,24 @@ Monitor results at [app.prefect.cloud](https://app.prefect.cloud).
 
 All paths and constants are in `utils/config.py`.
 
-| Setting | Default | How to override |
+| Setting | Default | Description |
 |---|---|---|
-| `PIPELINE_ROOT` | `<repo>\data_pipeline` | Set `PIPELINE_ROOT` env var |
-| `IMF_START_YEAR` | 2000 | Edit `config.py` |
-| `MAX_MONTH_ON_MONTH_CHANGE` | 30% | Edit `config.py` |
-
-Pipeline schedule day and time are set in `scripts\setup_task_scheduler.ps1`
-(look for `-DaysOfMonth 17 -At "17:10"`).
+| `PIPELINE_ROOT` | `<repo>\data_pipeline` | Override via env var |
+| `IMF_START_YEAR` | 2000 | First year for backfill |
+| `MAX_MONTH_ON_MONTH_CHANGE` | 30% | MoM flag threshold |
+| `RATE_MISMATCH_TOLERANCE` | 0.1% | Cross-validation tolerance |
+| `BACKFILL_CHUNK_SIZE` | 12 | Months per API call |
 
 ---
 
 ## Troubleshooting
 
-**Worker not running?**
-```
-scripts\start_worker.bat
-```
+**Worker not running?** `scripts\start_worker.bat`
 
-**Task Scheduler not firing?**
-```
-schtasks /query /tn Prefect-IMF* /fo LIST
-schtasks /run /tn Prefect-IMF-Pipeline
-```
+**Re-fetch a specific month?** Delete `data\exchange_rates_YYYY_MM.csv` and run the pipeline.
 
-**Flow failed — where are the logs?**
-- Prefect Cloud UI: full logs per flow run
-- Local: `logs\task_scheduler.log` — exit codes and timestamps
-- Error details: `data_pipeline\6_logs\<batch_id>_error.log`
+**Force re-fetch everything?** `scripts\run_backfill.bat --force`
 
-**Want to re-fetch a month that already has a CSV?**
-Delete `data\exchange_rates_YYYY_MM.csv` and run `scripts\run_CurrencyAcquisition.bat`.
+**Validate manually?** `python utils\imf_data_validator.py --csv data\exchange_rates_2025_01.csv`
 
-**Validate any CSV manually:**
-```
-python utils\imf_data_validator.py --csv data\exchange_rates_2025_01.csv
-```
+**Cross-validate a range?** `scripts\run_cross_validate.bat --start 2020-01 --end 2024-12`

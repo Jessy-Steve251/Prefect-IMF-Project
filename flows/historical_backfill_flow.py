@@ -2,24 +2,37 @@
 historical_backfill_flow.py
 ----------------------------
 One-shot Prefect flow to backfill IMF exchange rate data from 2000 to
-last month, month by month.
+last month.
 
-Features:
-  - Skips months that already have a complete CSV (idempotent / resumable)
-  - Detects incomplete months using a country-presence tracker
-    (data/country_presence.json)
-  - Rates API calls at 0.5s apart to be polite to the IMF endpoint
-  - Produces a combined exchange_rates_ALL.csv at the end
-  - Validates each freshly fetched month before saving
+Enhanced features:
+  - CHUNKED fetching: yearly API calls instead of 300+ monthly calls
+    (2000-01 to 2000-12 in one call, etc.)
+  - Per-month validation against live IMF values after fetch
+  - Cross-validation of entire historical dataset
+  - Resumable: skips months that already have complete CSVs
+  - Force mode: re-fetches everything from scratch
+  - Produces combined exchange_rates_ALL.csv
 
-Run once manually:
-    prefect deployment run historical-backfill/historical-backfill
-  or locally:
-    python flows/historical_backfill_flow.py
+Run modes:
+  1. Standard backfill (skip existing):
+       python flows/historical_backfill_flow.py
+
+  2. Force re-fetch everything:
+       python flows/historical_backfill_flow.py --force
+
+  3. Backfill + full cross-validation:
+       python flows/historical_backfill_flow.py --validate-all
+
+  4. Backfill specific range:
+       python flows/historical_backfill_flow.py --start-year 2020 --start-month 1
+
+  5. Cross-validate only (no fetch):
+       python flows/historical_backfill_flow.py --cross-validate-only --sample 24
 """
 
 import json
 import time
+import argparse
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
@@ -28,16 +41,22 @@ from prefect import flow, task, get_run_logger
 from prefect.artifacts import create_markdown_artifact
 
 from utils.exchange_rate_fetcher import (
-    get_currency_data_from_imf,
-    process_xml_to_dataframe,
+    fetch_rates_chunked,
+    fetch_rates_for_range,
+    build_month_list,
+)
+from utils.imf_data_validator import (
+    cross_validate_historical,
+    cross_validate_historical_task,
+    save_report,
+    print_cross_validation_summary,
 )
 from utils.config import (
-    DATA_DIR, ensure_dirs,
+    DATA_DIR, VALIDATION_DIR, ensure_dirs,
     IMF_START_YEAR, EXPECTED_MIN_COUNTRY_COUNT,
 )
 
 COUNTRY_TRACKER_FILE = DATA_DIR / "country_presence.json"
-COUNTRIES_OF_INTEREST = ["GHA", "NGA", "ZAF", "KEN", "EGY", "ETH"]
 
 
 # ---------------------------------------------------------------------------
@@ -59,109 +78,66 @@ def _save_tracker(tracker: dict):
         json.dump(tracker, f, indent=2, ensure_ascii=False)
 
 
-def _build_month_list(start_year: int, start_month: int) -> list[tuple[int, int]]:
-    """Returns list of (year, month) tuples from start up to last month."""
-    today = datetime.now()
-    end_year  = today.year
-    end_month = today.month - 1
-    if end_month == 0:
-        end_year  -= 1
-        end_month  = 12
+def _update_tracker_from_csvs(tracker: dict, logger=None) -> dict:
+    """Scans all CSVs in data/ and updates the country tracker."""
+    all_csvs = sorted(DATA_DIR.glob("exchange_rates_[0-9][0-9][0-9][0-9]_[0-9][0-9].csv"))
+    updated = 0
 
-    months = []
-    year, month = start_year, start_month
-    while (year, month) <= (end_year, end_month):
-        months.append((year, month))
-        month += 1
-        if month > 12:
-            month = 1
-            year += 1
-    return months
+    for csv_path in all_csvs:
+        parts = csv_path.stem.split("_")
+        try:
+            month_key = f"{parts[-2]}_{parts[-1]}"
+        except (ValueError, IndexError):
+            continue
+
+        df = pd.read_csv(csv_path, encoding="utf-8-sig")
+        countries = sorted(df["Country"].dropna().unique().tolist())
+
+        existing = set(tracker.get(month_key, {}).get("countries", []))
+        new_countries = set(countries)
+
+        if new_countries != existing:
+            tracker[month_key] = {"countries": countries, "count": len(countries)}
+            updated += 1
+
+    if logger and updated:
+        logger.info(f"Updated tracker for {updated} months")
+
+    return tracker
 
 
 # ---------------------------------------------------------------------------
-# Per-month fetch task
+# Backfill task (chunked)
 # ---------------------------------------------------------------------------
 
-@task(name="fetch_month", retries=2, retry_delay_seconds=10)
-def fetch_month(year: int, month: int, tracker: dict, logger) -> dict:
+@task(name="chunked_backfill", retries=1, retry_delay_seconds=30)
+def chunked_backfill(start_year: int, start_month: int,
+                     end_year: int = None, end_month: int = None,
+                     force: bool = False, chunk_size: int = 12,
+                     logger=None) -> dict:
     """
-    Fetches and saves one month's exchange rates.
-    Returns a result dict: {month_key, status, rows, countries, skipped}.
+    Fetches historical data in yearly chunks.
+    Returns result dict with stats.
     """
-    date_str  = f"{year}-{month:02d}"
-    month_key = f"{year}_{month:02d}"
-    filepath  = DATA_DIR / f"exchange_rates_{month_key}.csv"
+    if logger is None:
+        logger = get_run_logger()
 
-    # ------------------------------------------------------------------
-    # Decide whether to fetch
-    # ------------------------------------------------------------------
-    if filepath.exists():
-        existing_df       = pd.read_csv(filepath, encoding="utf-8-sig")
-        existing_countries = set(existing_df["Country"].unique())
+    result = fetch_rates_chunked(
+        start_year=start_year,
+        start_month=start_month,
+        end_year=end_year,
+        end_month=end_month,
+        chunk_size_months=chunk_size,
+        logger=logger,
+        force=force,
+        delay_between_chunks=1.0,
+    )
 
-        if month_key in tracker:
-            expected = set(tracker[month_key].get("countries", []))
-            missing  = expected - existing_countries
-            if not missing:
-                logger.info(f"  ⏭  {date_str}: complete ({len(existing_countries)} countries)")
-                return {
-                    "month_key": month_key, "status": "skipped",
-                    "rows": len(existing_df), "countries": list(existing_countries),
-                }
-            else:
-                logger.info(f"  ⚠  {date_str}: {len(missing)} countries missing — re-fetching")
-        else:
-            # No tracker entry yet — accept existing file, just register it
-            logger.info(f"  ⏭  {date_str}: exists (first time tracking)")
-            return {
-                "month_key": month_key, "status": "skipped",
-                "rows": len(existing_df), "countries": list(existing_countries),
-            }
-
-    # ------------------------------------------------------------------
-    # Fetch from IMF
-    # ------------------------------------------------------------------
-    logger.info(f"  📥 {date_str}: fetching...")
-    xml_data = get_currency_data_from_imf(date_str, date_str, logger=logger)
-
-    if not xml_data:
-        logger.warning(f"  ❌ {date_str}: IMF returned no data")
-        return {"month_key": month_key, "status": "failed", "rows": 0, "countries": []}
-
-    df = process_xml_to_dataframe(xml_data, logger=logger)
-
-    if df.empty:
-        logger.warning(f"  ❌ {date_str}: empty DataFrame after parsing")
-        return {"month_key": month_key, "status": "failed", "rows": 0, "countries": []}
-
-    new_countries = set(df["Country"].unique())
-
-    if len(new_countries) < EXPECTED_MIN_COUNTRY_COUNT:
-        logger.warning(
-            f"  ⚠  {date_str}: only {len(new_countries)} countries (suspicious) — saved anyway"
-        )
-
-    # Back up old file if it existed
-    if filepath.exists():
-        filepath.rename(filepath.with_suffix(".csv.bak"))
-
-    df["Date"] = df["Date"].astype(str)
-    df.to_csv(filepath, index=False, encoding="utf-8-sig")
-
-    # Log countries of interest
-    for cc in COUNTRIES_OF_INTEREST:
-        if cc in new_countries:
-            rate = df.loc[df["Country"] == cc, "Exchange_Rate"].iloc[0]
-            logger.info(f"     {cc}: {rate:.4f}")
-
-    logger.info(f"  ✅ {date_str}: {len(df)} rows, {len(new_countries)} countries")
-    time.sleep(0.5)   # be polite to IMF API
-
-    return {
-        "month_key": month_key, "status": "fetched",
-        "rows": len(df), "countries": list(new_countries),
-    }
+    logger.info(
+        f"Chunked backfill complete: {len(result['saved_files'])} files, "
+        f"{len(result['failed_chunks'])} failed chunks"
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -169,51 +145,95 @@ def fetch_month(year: int, month: int, tracker: dict, logger) -> dict:
 # ---------------------------------------------------------------------------
 
 @flow(name="historical_backfill_flow")
-def historical_backfill_flow(start_year: int = IMF_START_YEAR, start_month: int = 1):
+def historical_backfill_flow(
+    start_year: int = IMF_START_YEAR,
+    start_month: int = 1,
+    end_year: int | None = None,
+    end_month: int | None = None,
+    force: bool = False,
+    validate_all: bool = False,
+    cross_validate_only: bool = False,
+    validation_sample: int | None = None,
+    chunk_size: int = 12,
+):
     """
-    Backfills IMF exchange rate data from start_year/start_month to last month.
-    Safe to re-run — already-complete months are skipped automatically.
+    Backfills IMF exchange rate data from start_year/start_month to present.
+
+    Modes:
+      - Standard:           Fetch missing months, build combined CSV
+      - force=True:         Re-fetch everything from scratch
+      - validate_all=True:  After fetching, cross-validate against IMF
+      - cross_validate_only: Skip fetch, just run cross-validation
 
     Args:
-        start_year:  First year to fetch (default: 2000 from config).
-        start_month: First month to fetch (default: 1).
+        start_year:           First year to fetch (default: 2000)
+        start_month:          First month to fetch (default: 1)
+        end_year/end_month:   End of range (default: last month)
+        force:                Overwrite existing CSVs
+        validate_all:         Run cross-validation after backfill
+        cross_validate_only:  Skip backfill, only cross-validate
+        validation_sample:    Number of random months to validate (None=all)
+        chunk_size:           Months per API call (default: 12)
     """
     logger = get_run_logger()
     ensure_dirs()
 
-    tracker     = _load_tracker()
-    month_list  = _build_month_list(start_year, start_month)
-    total       = len(month_list)
+    months = build_month_list(start_year, start_month, end_year, end_month)
+    total_months = len(months)
 
-    logger.info(f"Backfill: {start_year}-{start_month:02d} → present  ({total} months)")
-
-    results   = []
-    n_fetched = n_skipped = n_failed = 0
-
-    for year, month in month_list:
-        result = fetch_month(year, month, tracker, logger)
-        results.append(result)
-
-        # Update tracker
-        if result["status"] in ("fetched", "skipped") and result["countries"]:
-            mk = result["month_key"]
-            existing_c = set(tracker.get(mk, {}).get("countries", []))
-            updated_c  = existing_c | set(result["countries"])
-            tracker[mk] = {"countries": list(updated_c), "count": len(updated_c)}
-
-        if   result["status"] == "fetched":  n_fetched += 1
-        elif result["status"] == "skipped":  n_skipped += 1
-        else:                                n_failed  += 1
-
-    # Save updated tracker
-    _save_tracker(tracker)
-    logger.info(f"Country presence tracker updated ({len(tracker)} months tracked)")
+    logger.info(f"Historical backfill: {start_year}-{start_month:02d} -> present "
+                f"({total_months} months)")
 
     # ------------------------------------------------------------------
-    # Build combined CSV
+    # Mode: Cross-validate only (no fetching)
+    # ------------------------------------------------------------------
+    if cross_validate_only:
+        logger.info("Cross-validate only mode - skipping fetch")
+        start_api = f"{start_year}-{start_month:02d}" if start_year else None
+        end_api = f"{end_year}-{end_month:02d}" if end_year and end_month else None
+
+        cv_report = cross_validate_historical_task(
+            start_api=start_api, end_api=end_api,
+            sample_months=validation_sample,
+        )
+        _create_cv_artifact(cv_report, logger)
+        return {"mode": "cross_validate_only", "report": cv_report}
+
+    # ------------------------------------------------------------------
+    # Step 1: Chunked fetch
+    # ------------------------------------------------------------------
+    logger.info(f"Fetching data in {chunk_size}-month chunks (force={force})...")
+
+    backfill_result = chunked_backfill(
+        start_year=start_year,
+        start_month=start_month,
+        end_year=end_year,
+        end_month=end_month,
+        force=force,
+        chunk_size=chunk_size,
+        logger=logger,
+    )
+
+    n_saved = len(backfill_result["saved_files"])
+    n_failed = len(backfill_result["failed_chunks"])
+
+    # ------------------------------------------------------------------
+    # Step 2: Update country tracker
+    # ------------------------------------------------------------------
+    tracker = _load_tracker()
+    tracker = _update_tracker_from_csvs(tracker, logger=logger)
+    _save_tracker(tracker)
+    logger.info(f"Country presence tracker updated ({len(tracker)} months)")
+
+    # ------------------------------------------------------------------
+    # Step 3: Build combined CSV
     # ------------------------------------------------------------------
     logger.info("Building combined dataset...")
     all_files = sorted(DATA_DIR.glob("exchange_rates_[0-9][0-9][0-9][0-9]_[0-9][0-9].csv"))
+
+    total_rows = total_ctry = 0
+    date_min = date_max = "N/A"
+
     if all_files:
         combined = pd.concat(
             [pd.read_csv(f, encoding="utf-8-sig") for f in all_files],
@@ -222,20 +242,51 @@ def historical_backfill_flow(start_year: int = IMF_START_YEAR, start_month: int 
 
         combined_path = DATA_DIR / "exchange_rates_ALL.csv"
         combined.to_csv(combined_path, index=False, encoding="utf-8-sig")
-        logger.info(f"Combined file: {combined_path}  ({len(combined):,} rows)")
+        total_rows = len(combined)
+        total_ctry = combined["Country"].nunique()
+        date_min   = combined["Date"].min()
+        date_max   = combined["Date"].max()
+        logger.info(f"Combined file: {combined_path}  ({total_rows:,} rows)")
 
-        total_rows    = len(combined)
-        total_ctry    = combined["Country"].nunique()
-        date_min      = combined["Date"].min()
-        date_max      = combined["Date"].max()
+    # ------------------------------------------------------------------
+    # Step 4: Optional cross-validation
+    # ------------------------------------------------------------------
+    cv_report = None
+    if validate_all:
+        logger.info("Running cross-validation against live IMF data...")
+        start_api = f"{start_year}-{start_month:02d}"
+        end_api = None  # will auto-detect from available files
+
+        cv_report = cross_validate_historical_task(
+            start_api=start_api, end_api=end_api,
+            sample_months=validation_sample,
+        )
+        _create_cv_artifact(cv_report, logger)
+
+    # ------------------------------------------------------------------
+    # Step 5: Summary artifact
+    # ------------------------------------------------------------------
+    failed_chunks_str = ""
+    if backfill_result["failed_chunks"]:
+        failed_chunks_str = "\n".join(
+            f"- {c['start']} -> {c['end']}: {c['error']}"
+            for c in backfill_result["failed_chunks"]
+        )
+        failed_section = f"## Failed Chunks\n{failed_chunks_str}"
     else:
-        total_rows = total_ctry = 0
-        date_min = date_max = "N/A"
+        failed_section = "## No failures"
 
-    # ------------------------------------------------------------------
-    # Summary artifact
-    # ------------------------------------------------------------------
-    failed_months = [r["month_key"] for r in results if r["status"] == "failed"]
+    cv_section = ""
+    if cv_report:
+        s = cv_report.get("summary", {})
+        cv_section = f"""## Cross-Validation Results
+| | |
+|---|---|
+| Months validated | {s.get('months_validated', 'N/A')} |
+| Perfect months | {s.get('months_perfect', 'N/A')} |
+| Total rates checked | {s.get('total_rates_checked', 'N/A'):,} |
+| Overall accuracy | {s.get('overall_accuracy_pct', 'N/A')}% |
+"""
 
     create_markdown_artifact(
         key="backfill-summary",
@@ -243,37 +294,104 @@ def historical_backfill_flow(start_year: int = IMF_START_YEAR, start_month: int 
 
 | | |
 |---|---|
-| Period | {start_year}-{start_month:02d} → present |
-| Total months | {total} |
-| Fetched (new/updated) | {n_fetched} |
-| Skipped (already complete) | {n_skipped} |
-| Failed | {n_failed} |
+| Period | {start_year}-{start_month:02d} -> present |
+| Total months | {total_months} |
+| Files saved/updated | {n_saved} |
+| Failed chunks | {n_failed} |
+| Force mode | {force} |
 
 ## Combined Dataset
 | | |
 |---|---|
 | Total rows | {total_rows:,} |
 | Countries | {total_ctry} |
-| Date range | {date_min} → {date_max} |
+| Date range | {date_min} -> {date_max} |
+| CSV count | {len(all_files)} |
 
-{"## ⚠️ Failed Months" + chr(10) + chr(10).join(f"- {m}" for m in failed_months) if failed_months else "## ✅ No failures"}
+{failed_section}
+
+{cv_section}
 """,
         description="IMF Historical Backfill Results",
     )
 
     logger.info(
-        f"Backfill complete — fetched: {n_fetched}, skipped: {n_skipped}, failed: {n_failed}"
+        f"Backfill complete - saved: {n_saved}, failed chunks: {n_failed}"
     )
-    if failed_months:
-        logger.warning(f"Failed months (re-run to retry): {failed_months}")
 
     return {
-        "fetched": n_fetched,
-        "skipped": n_skipped,
-        "failed":  n_failed,
-        "failed_months": failed_months,
+        "saved_files": n_saved,
+        "failed_chunks": n_failed,
+        "total_rows": total_rows,
+        "total_countries": total_ctry,
+        "cross_validation": cv_report,
     }
 
 
+def _create_cv_artifact(cv_report: dict, logger):
+    """Creates a Prefect artifact for cross-validation results."""
+    try:
+        s = cv_report.get("summary", {})
+        status = cv_report.get("overall_status", "UNKNOWN")
+
+        imperfect_lines = ""
+        for m in cv_report.get("imperfect_months", [])[:20]:
+            imperfect_lines += f"| {m['month']} | {m['mismatches']} | {m['accuracy']}% |\n"
+
+        create_markdown_artifact(
+            key="cross-validation-results",
+            markdown=f"""# Cross-Validation Report  |  {status}
+
+| Metric | Value |
+|---|---|
+| Months checked | {s.get('months_checked', 'N/A')} |
+| Months validated | {s.get('months_validated', 'N/A')} |
+| Perfect months | {s.get('months_perfect', 'N/A')} |
+| Months with mismatches | {s.get('months_with_mismatches', 'N/A')} |
+| Fetch failures | {s.get('fetch_failures', 'N/A')} |
+| Total rates checked | {s.get('total_rates_checked', 0):,} |
+| Total matches | {s.get('total_matches', 0):,} |
+| Total mismatches | {s.get('total_mismatches', 0):,} |
+| **Overall accuracy** | **{s.get('overall_accuracy_pct', 'N/A')}%** |
+
+{"## Months with Issues" + chr(10) + "| Month | Mismatches | Accuracy |" + chr(10) + "|---|---|---|" + chr(10) + imperfect_lines if imperfect_lines else "## All validated months are perfect!"}
+""",
+            description="IMF Historical Cross-Validation Results",
+        )
+    except Exception as exc:
+        logger.warning(f"Artifact creation failed (non-fatal): {exc}")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
-    historical_backfill_flow()
+    ap = argparse.ArgumentParser(description="IMF Historical Backfill")
+    ap.add_argument("--start-year", type=int, default=IMF_START_YEAR)
+    ap.add_argument("--start-month", type=int, default=1)
+    ap.add_argument("--end-year", type=int, default=None)
+    ap.add_argument("--end-month", type=int, default=None)
+    ap.add_argument("--force", action="store_true",
+                    help="Re-fetch all months even if CSVs exist")
+    ap.add_argument("--validate-all", action="store_true",
+                    help="Cross-validate all fetched data against IMF after backfill")
+    ap.add_argument("--cross-validate-only", action="store_true",
+                    help="Skip fetch, just run cross-validation")
+    ap.add_argument("--sample", type=int, default=None,
+                    help="Validate a random sample of N months")
+    ap.add_argument("--chunk-size", type=int, default=12,
+                    help="Months per API call (default: 12)")
+    args = ap.parse_args()
+
+    historical_backfill_flow(
+        start_year=args.start_year,
+        start_month=args.start_month,
+        end_year=args.end_year,
+        end_month=args.end_month,
+        force=args.force,
+        validate_all=args.validate_all,
+        cross_validate_only=args.cross_validate_only,
+        validation_sample=args.sample,
+        chunk_size=args.chunk_size,
+    )

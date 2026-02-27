@@ -38,3 +38,6 @@ env/
 .DS_Store
 Thumbs.db
 desktop.ini
+scripts/setup_task_scheduler_backup.ps1 
+scripts/setup_task_scheduler_fixed.ps1 
+logs/ 

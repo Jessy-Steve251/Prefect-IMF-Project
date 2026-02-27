@@ -45,7 +45,8 @@ def currency_acquisition_flow():
     # Step 2: Validate — raises ValueError if data is incomplete/corrupt,
     # which stops the chain before bad data reaches the batch pipeline
     # ------------------------------------------------------------------
-    report   = validate_exchange_rate_data(fx_path, fail_on_issues=True)
+    report   = validate_exchange_rate_data(fx_path, fail_on_issues=True,
+                                              include_rate_check=True)
     coverage = report["checks"]["country_coverage"]["coverage_pct"]
     logger.info(
         f"Validation passed — {report['total_rows']} rows, "

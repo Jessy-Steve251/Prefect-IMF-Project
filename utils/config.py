@@ -79,6 +79,8 @@ MAX_REASONABLE_RATE         = 100_000
 MIN_REASONABLE_RATE         = 0.0001
 MAX_MONTH_ON_MONTH_CHANGE   = 0.30    # 30% — flag but don't fail
 EXPECTED_MIN_COUNTRY_COUNT  = 50      # below this a month's data is suspicious
+RATE_MISMATCH_TOLERANCE     = 0.001   # 0.1% — tolerance for cross-validation
+BACKFILL_CHUNK_SIZE         = 12      # months per API call (12 = yearly chunks)
 
 # ---------------------------------------------------------------------------
 # Scheduling (Europe/Zurich — matches prefect.yaml)
