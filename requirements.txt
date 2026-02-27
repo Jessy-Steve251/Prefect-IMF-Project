@@ -1,4 +1,5 @@
-prefect
-prefect-github
-pandas
-requests
+prefect>=3.6.5
+pandas>=2.0.0
+requests>=2.31.0
+lxml>=4.9.0
+python-dotenv>=1.0.0

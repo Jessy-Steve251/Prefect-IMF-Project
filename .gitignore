@@ -1,40 +1,40 @@
-# Python 
-__pycache__/ 
-*.py[cod] 
-*$py.class 
-.Python 
-env/ 
-venv/ 
-.env 
-.venv 
-data/ 
-*.csv 
-*.json 
-.prefect/ 
-prefect.db 
-.vscode/ 
-.idea/ 
-.DS_Store 
-Thumbs.db 
-*.log 
-logs/ 
-
-# Data files
-*.csv
-*.parquet
-*.xlsx
+# Pipeline runtime data — never commit these
 data/
-currency_data_*/
-complete_dataset_*.csv
+data_pipeline/
 
-# Backups
-*_original.bat
-*_original.ps1
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
 
-# Logs
-logs/
-*.log
+# Virtual environments
+venv/
+.venv/
+env/
 
-# Temporary files
-Running
-temp_*.py
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Secrets / env files
+.env
+*.env
+
+# Prefect
+.prefect/
+
+# Backups created by historical backfill
+*.csv.bak
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

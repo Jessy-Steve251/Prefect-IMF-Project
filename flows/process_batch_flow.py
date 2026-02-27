@@ -1,44 +1,68 @@
-from prefect import flow, get_run_logger
-from utils.core_processor import run_core_processing
+"""
+process_batch_flow.py
+---------------------
+Flow 3 of 3 in the hybrid execution model.
+
+Execution:  Local Python via Prefect worker (chained from Flow 2)
+Monitoring: Prefect Cloud (logs, run history)
+
+Triggered automatically by prepare_batch_flow on success.
+Can also be run manually via: scripts\run_ProcessBatch.bat
+"""
+
 import os
 from pathlib import Path
 
+from prefect import flow, get_run_logger
 
-@flow(name="process_batch_flow", retries=2, retry_delay_seconds=10)
+from utils.core_processor import run_core_processing
+from utils.config import HOT_DIR, ensure_dirs
+
+
+@flow(name="process_batch_flow", retries=2, retry_delay_seconds=30)
 def process_batch_flow(manifest_file: str = ""):
     """
-    This flow processes a complete batch using the MANIFEST.json.
-    It is triggered automatically when a new manifest file is created.
-    
+    Step 3: Loads the MANIFEST.json, runs core transformation, and
+    archives results to 4_archive/.
+
     Args:
-        manifest_file: Path to the manifest JSON file. If not provided, 
-                      automatically finds the latest manifest in the hotfolder.
+        manifest_file: Path to manifest JSON. When called from
+                       prepare_batch_flow this is always provided
+                       explicitly. If empty (manual run), the latest
+                       manifest in the hotfolder is used.
+
+    Triggered by: prepare_batch_flow (local chain)
+    Monitored by: Prefect Cloud
     """
     logger = get_run_logger()
-    
-    # If no manifest file provided, find the latest one
+    ensure_dirs()
+
+    # ------------------------------------------------------------------
+    # Resolve manifest path
+    # ------------------------------------------------------------------
     if not manifest_file:
-        hotfolder = os.path.join(os.getcwd(), "data_pipeline", "3_processing_hotfolder")
-        os.makedirs(hotfolder, exist_ok=True)
-        
-        # Find all manifest files
-        manifest_files = list(Path(hotfolder).glob("*_MANIFEST.json"))
-        
-        if not manifest_files:
-            logger.error("No manifest files found in hotfolder")
-            raise FileNotFoundError(f"No manifest files found in {hotfolder}")
-        
-        # Get the latest manifest file
-        manifest_file = str(max(manifest_files, key=os.path.getctime))
-        logger.info(f"Found latest manifest: {manifest_file}")
-    
-    logger.info(f"Processing batch from manifest: {manifest_file}")
-    
-    run_core_processing(manifest_file)
-    
+        # Manual re-run: pick the newest manifest by modification time
+        # (getmtime is consistent across Windows and Linux)
+        manifests = sorted(
+            HOT_DIR.glob("*_MANIFEST.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not manifests:
+            raise FileNotFoundError(f"No manifest files found in {HOT_DIR}")
+        manifest_file = str(manifests[0])
+        logger.info(f"Auto-selected latest manifest: {Path(manifest_file).name}")
+    else:
+        if not os.path.exists(manifest_file):
+            raise FileNotFoundError(f"Manifest not found: {manifest_file}")
+        logger.info(f"Using manifest: {Path(manifest_file).name}")
+
+    # ------------------------------------------------------------------
+    # Process
+    # ------------------------------------------------------------------
+    run_core_processing(manifest_file, logger=logger)
     logger.info("Batch processing completed successfully.")
 
 
 if __name__ == "__main__":
-    # for debugging only
     process_batch_flow()

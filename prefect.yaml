@@ -1,6 +1,31 @@
+# =============================================================================
+# prefect.yaml — Hybrid Execution Model
+# =============================================================================
+#
+# EXECUTION LAYER  →  Windows Task Scheduler + local Prefect worker
+# MONITORING LAYER →  Prefect Cloud (UI, logs, artifacts, run history)
+#
+# All cloud schedules are DISABLED.
+# Flows are triggered locally by Windows Task Scheduler via .bat files.
+# Prefect Cloud records every run for monitoring — it does NOT trigger them.
+#
+# Flow chain (programmatic, not time-gap based):
+#   Task Scheduler → Flow 1 → Flow 2 → Flow 3  (all local)
+#
+# Deployment names must match what's passed to `prefect deployment run`
+# in the manual .bat scripts.
+# =============================================================================
+
 deployments:
+
+  # ---------------------------------------------------------------------------
+  # Flow 1 — Fetch + validate monthly exchange rates, then chains to Flow 2
+  # Triggered by: Windows Task Scheduler (scripts\run_CurrencyAcquisition.bat)
+  # ---------------------------------------------------------------------------
   - name: currency-acquisition
-    description: Acquire currency exchange rate data
+    description: >
+      Fetch last month's IMF exchange rates, validate completeness,
+      then chain to prepare-batch. Executed locally by Windows Task Scheduler.
     entrypoint: flows/currency_acquisition_flow.py:currency_acquisition_flow
     work_pool:
       name: Yichen_Test
@@ -14,13 +39,17 @@ deployments:
       - prefect.deployments.steps.pip_install_requirements:
           directory: "{{ clone-step.directory }}"
           requirements_file: requirements.txt
-    schedules:
-      - cron: "10 17 17 * *"
-        timezone: Europe/Zurich
-        active: true
+    schedules: []   # NO cloud schedule — triggered by Windows Task Scheduler
 
+  # ---------------------------------------------------------------------------
+  # Flow 2 — Prepare batch artefacts and write MANIFEST
+  # Triggered by: Flow 1 (programmatic local chain)
+  # Manual re-run: scripts\run_PrepareBatch.bat
+  # ---------------------------------------------------------------------------
   - name: prepare-batch
-    description: Prepare batch data
+    description: >
+      Prepare preprocessing files and generate MANIFEST.json.
+      Chained from currency-acquisition. Manual re-run available via bat file.
     entrypoint: flows/prepare_batch_flow.py:prepare_batch_flow
     work_pool:
       name: Yichen_Test
@@ -34,13 +63,17 @@ deployments:
       - prefect.deployments.steps.pip_install_requirements:
           directory: "{{ clone-step.directory }}"
           requirements_file: requirements.txt
-    schedules:
-      - cron: "30 17 17 * *"
-        timezone: Europe/Zurich
-        active: true
+    schedules: []   # NO cloud schedule — chained from Flow 1
 
+  # ---------------------------------------------------------------------------
+  # Flow 3 — Process batch from MANIFEST and archive results
+  # Triggered by: Flow 2 (programmatic local chain)
+  # Manual re-run: scripts\run_ProcessBatch.bat
+  # ---------------------------------------------------------------------------
   - name: process-batch
-    description: Process batch data
+    description: >
+      Run core data transformation and archive results to 4_archive/.
+      Chained from prepare-batch. Manual re-run available via bat file.
     entrypoint: flows/process_batch_flow.py:process_batch_flow
     work_pool:
       name: Yichen_Test
@@ -54,14 +87,18 @@ deployments:
       - prefect.deployments.steps.pip_install_requirements:
           directory: "{{ clone-step.directory }}"
           requirements_file: requirements.txt
-    schedules:
-      - cron: "30 17 17 * *"
-        timezone: Europe/Zurich
-        active: true
+    schedules: []   # NO cloud schedule — chained from Flow 2
 
-  - name: complete-batch-pipeline
-    description: Run complete batch pipeline
-    entrypoint: flows/complete_batch_pipeline.py:complete_batch_pipeline
+  # ---------------------------------------------------------------------------
+  # Flow 4 — Historical backfill (one-shot, resumable)
+  # Triggered by: scripts\run_backfill.bat (manual, run once to fill gaps)
+  # ---------------------------------------------------------------------------
+  - name: historical-backfill
+    description: >
+      Backfill IMF exchange rates from 2000 to present month by month.
+      Idempotent and resumable — already-complete months are skipped.
+      Run manually via scripts\run_backfill.bat when gaps are detected.
+    entrypoint: flows/historical_backfill_flow.py:historical_backfill_flow
     work_pool:
       name: Yichen_Test
     pull:
@@ -74,7 +111,4 @@ deployments:
       - prefect.deployments.steps.pip_install_requirements:
           directory: "{{ clone-step.directory }}"
           requirements_file: requirements.txt
-    schedules:
-      - cron: "30 17 17 * *"
-        timezone: Europe/Zurich
-        active: true
+    schedules: []   # NO cloud schedule — triggered manually
