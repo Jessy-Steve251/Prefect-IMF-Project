@@ -34,7 +34,7 @@ from utils.config import (
     IMF_FLOW_REF, IMF_KEY, IMF_API_TIMEOUT_SEC,
     MAX_REASONABLE_RATE, MIN_REASONABLE_RATE,
     MAX_MONTH_ON_MONTH_CHANGE, EXPECTED_MIN_COUNTRY_COUNT,
-    VALIDATION_DIR,
+    VALIDATION_DIR, IMF_AGGREGATE_CODES,
 )
 
 
@@ -79,8 +79,12 @@ def _check_coverage(df: pd.DataFrame, imf_countries: set) -> dict:
 
 
 def _check_null_currencies(df: pd.DataFrame) -> dict:
+    """Flags rows with no currency code, excluding known IMF aggregate codes
+    which are not real countries and will never have a currency."""
     null_mask = df["Currency"].isna() | (df["Currency"].astype(str).str.strip().isin(["None", ""]))
     bad = df[null_mask]
+    # Exclude known IMF aggregate/regional codes — these are expected to have no currency
+    bad = bad[~bad["Country"].isin(IMF_AGGREGATE_CODES)]
     return {"count": len(bad), "countries": sorted(bad["Country"].unique().tolist())}
 
 

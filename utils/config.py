@@ -54,11 +54,22 @@ REST_COUNTRIES_MAX_WORKERS  = 10      # parallel threads for currency lookups
 CURRENCY_CACHE_FILE         = DATA_DIR / "currency_cache.json"
 
 # Hardcoded overrides for territories the REST Countries API mis-maps
+# Real territories with non-standard mappings + IMF aggregate codes
+# that have no individual currency (will never resolve via REST Countries API).
+# Codes mapped to None are excluded from the null-currency validation check.
 SPECIAL_CURRENCY_OVERRIDES = {
     "CUW":  "XCG",   # Curaçao
     "SXM":  "XCG",   # Sint Maarten
     "G163": "EUR",   # Eurozone aggregate
+    # IMF regional/analytical aggregates — not real countries
+    "G758": None,
+    "CWX":  None,
+    "G309": None,
+    "G759": None,
 }
+
+# These codes are expected to have no currency — excluded from validation FAIL
+IMF_AGGREGATE_CODES = {"G758", "CWX", "G309", "G759", "G163"}
 
 # ---------------------------------------------------------------------------
 # Validation thresholds
